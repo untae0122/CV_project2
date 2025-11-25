@@ -9,11 +9,12 @@ __pycache__/
 *.ckpt
 
 # Data and Results
-data/
 results/
 *.png
 *.jpg
 *.jpeg
+*.tar.gz
+*.zip
 
 # VS Code
 .vscode/
