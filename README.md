@@ -25,7 +25,7 @@ You can run the training script `main.py` with the following arguments:
 
 **Example: Run all methods (recommended)**
 ```bash
-python main.py --pe_method all --epochs 50
+python main.py --pe_method all --epochs 50 --batch_size 128
 ```
 
 **Example: Run specific method**
