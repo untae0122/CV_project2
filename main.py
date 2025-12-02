@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 import time
 import os
 import json
+from datetime import datetime
 
 from model import VisionTransformer
 from utils import set_seed, plot_metrics, plot_comparison
@@ -71,7 +72,10 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
-    os.makedirs(args.save_dir, exist_ok=True)
+    # Create timestamped save directory inside args.save_dir
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    save_dir = os.path.join(args.save_dir, timestamp)
+    os.makedirs(save_dir, exist_ok=True)
     
     # Data Preparation
     transform_train = transforms.Compose([
@@ -92,6 +96,8 @@ def main():
     testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
     testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
+    print(f"Training on {len(trainset)} samples, validating on {len(testset)} samples.")
+    print(f"Results will be saved to: {save_dir}")
     methods = ['sinusoidal', 'rope', 'learnable'] if args.pe_method == 'all' else [args.pe_method]
     
     all_results = {}
@@ -124,7 +130,7 @@ def main():
         print(f"Training finished in {total_time:.2f}s")
         
         # Save metrics
-        plot_metrics(train_losses, val_accs, method, save_dir=args.save_dir)
+        plot_metrics(train_losses, val_accs, method, save_dir=save_dir)
         all_results[method] = {
             'train_loss': train_losses,
             'val_acc': val_accs,
@@ -133,14 +139,14 @@ def main():
         }
         
         # Save model
-        torch.save(model.state_dict(), os.path.join(args.save_dir, f'vit_{method}.pth'))
+        torch.save(model.state_dict(), os.path.join(save_dir, f'vit_{method}.pth'))
 
     # Save all results to json
-    with open(os.path.join(args.save_dir, 'results.json'), 'w') as f:
+    with open(os.path.join(save_dir, 'results.json'), 'w') as f:
         json.dump(all_results, f, indent=4)
         
     if len(methods) > 1:
-        plot_comparison(all_results, save_dir=args.save_dir)
+        plot_comparison(all_results, save_dir=save_dir)
         print("\nComparison plot saved.")
 
 if __name__ == '__main__':
