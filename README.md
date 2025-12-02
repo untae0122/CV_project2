@@ -33,6 +33,9 @@ python main.py --pe_method all --epochs 50 --batch_size 128
 python main.py --pe_method rope --epochs 50
 ```
 
+**Example: Run specific gpu**
+CUDA_VISIBLE_DEVICES=1 python main.py --pe_method all --epochs 50 --batch_size 128
+
 ## Results
 
 The script will save:
