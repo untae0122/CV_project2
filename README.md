@@ -8,7 +8,7 @@ This project implements a Vision Transformer (ViT) from scratch on CIFAR-10 and 
 ## Requirements
 
 ```bash
-pip install torch torchvision matplotlib numpy
+pip install torch torchvision matplotlib numpy scikit-learn
 ```
 
 ## Usage
