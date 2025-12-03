@@ -9,13 +9,18 @@ import time
 import os
 import json
 from datetime import datetime
+import numpy as np
+from torch.utils.data import Subset
+from sklearn.model_selection import train_test_split
 
 from model import VisionTransformer
 from utils import set_seed, plot_metrics, plot_comparison
 
+METHODS = ['sinusoidal', 'rope', 'learnable']
+
 def get_args():
     parser = argparse.ArgumentParser(description='ViT Positional Encoding Analysis')
-    parser.add_argument('--pe_method', type=str, default='all', choices=['sinusoidal', 'rope', 'learnable', 'all'],
+    parser.add_argument('--pe_method', type=str, default='all', choices=METHODS + ['all'],
                         help='Positional encoding method to use')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs') # Reduced default for faster testing, user can increase
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
@@ -90,15 +95,32 @@ def main():
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
-    trainset = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True, transform=transform_train)
-    trainloader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    # Load full training data
+    trainset_full = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True, transform=transform_train)
+    validset_full = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True, transform=transform_test) # Use test transform for validation
+
+    # Stratified Split with FIXED SEED for consistency across experiments
+    targets = trainset_full.targets
+    train_idx, valid_idx = train_test_split(
+        np.arange(len(targets)),
+        test_size=0.1, # 10% for validation (5000 images)
+        shuffle=True,
+        stratify=targets,
+        random_state=42 # FIXED SEED: Valid set remains same even if args.seed changes
+    )
+
+    train_subset = Subset(trainset_full, train_idx)
+    valid_subset = Subset(validset_full, valid_idx)
+
+    trainloader = DataLoader(train_subset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    validloader = DataLoader(valid_subset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
     testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    print(f"Training on {len(trainset)} samples, validating on {len(testset)} samples.")
+    print(f"Training on {len(train_subset)} samples, validating on {len(valid_subset)} samples.")
     print(f"Results will be saved to: {save_dir}")
-    methods = ['sinusoidal', 'rope', 'learnable'] if args.pe_method == 'all' else [args.pe_method]
+    methods = METHODS if args.pe_method == 'all' else [args.pe_method]
     
     all_results = {}
 
@@ -106,25 +128,43 @@ def main():
         print(f"\nTraining with {method} PE...")
         model = VisionTransformer(pe_method=method).to(device)
         
+        # Separate parameters for weight decay
+        param_groups = [
+            {'params': [], 'weight_decay': 1e-4},
+            {'params': [], 'weight_decay': 0.0}
+        ]
+        
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            # Exclude pos_embed, cls_token, biases, and normalization parameters from weight decay
+            if 'pos_embed' in name or 'cls_token' in name or 'bias' in name or 'norm' in name:
+                param_groups[1]['params'].append(param)
+            else:
+                param_groups[0]['params'].append(param)
+
         # Using AdamW as it's standard for ViTs
-        optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        optimizer = optim.AdamW(param_groups, lr=args.lr)
         criterion = nn.CrossEntropyLoss()
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
         train_losses = []
         val_accs = []
+        test_accs = []
         
         start_time = time.time()
         
         for epoch in range(args.epochs):
             train_loss, train_acc = train_one_epoch(model, trainloader, criterion, optimizer, device)
-            val_loss, val_acc = evaluate(model, testloader, criterion, device)
+            val_loss, val_acc = evaluate(model, validloader, criterion, device)
+            test_loss, test_acc = evaluate(model, testloader, criterion, device)
             scheduler.step()
             
             train_losses.append(train_loss)
             val_accs.append(val_acc)
+            test_accs.append(test_acc)
             
-            print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.2f}%")
+            print(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%")
             
         total_time = time.time() - start_time
         print(f"Training finished in {total_time:.2f}s")
@@ -134,12 +174,17 @@ def main():
         all_results[method] = {
             'train_loss': train_losses,
             'val_acc': val_accs,
+            'test_acc_history': test_accs,
             'final_val_acc': val_accs[-1],
             'training_time': total_time
         }
         
         # Save model
         torch.save(model.state_dict(), os.path.join(save_dir, f'vit_{method}.pth'))
+
+        # Final Test Evaluation (Already done in loop, but printing final again for clarity)
+        print(f"Final Test Acc: {test_accs[-1]:.2f}%")
+        all_results[method]['final_test_acc'] = test_accs[-1]
 
     # Save all results to json
     with open(os.path.join(save_dir, 'results.json'), 'w') as f:
