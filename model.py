@@ -173,6 +173,105 @@ class RoPEAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+class PolarRoPEAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., 
+                 img_size=32, patch_size=4):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        # Precompute Polar RoPE frequencies
+        grid_size = img_size // patch_size
+        self.head_dim = head_dim
+        
+        # 1. Coordinate System Transformation
+        # Center definition
+        c_x = (grid_size - 1) / 2.0
+        c_y = (grid_size - 1) / 2.0
+        
+        # Grid coordinates
+        y_idx, x_idx = torch.meshgrid(torch.arange(grid_size), torch.arange(grid_size), indexing='ij')
+        
+        # Centered coordinates
+        x_prime = x_idx - c_x
+        y_prime = y_idx - c_y
+        
+        # Polar coordinates
+        r = torch.sqrt(x_prime**2 + y_prime**2)
+        theta = torch.atan2(y_prime, x_prime)
+        
+        # Flatten
+        r = r.flatten() # (N,)
+        theta = theta.flatten() # (N,)
+        
+        # 2. Frequency Decomposition
+        # Split head_dim into two halves: 0~D/2 for r, D/2~D for theta
+        half_dim = head_dim // 2
+        
+        # Frequencies for r (using first half of dimensions)
+        # We use half_dim for r, so we generate frequencies for it.
+        # Standard RoPE uses pairs, so we need half_dim to be even.
+        freqs_r_dim = half_dim
+        theta_r = 10000.0 ** (-torch.arange(0, freqs_r_dim, 2).float() / freqs_r_dim)
+        freqs_r = torch.outer(r, theta_r) # (N, freqs_r_dim/2)
+        
+        # Frequencies for theta (using second half of dimensions)
+        freqs_theta_dim = head_dim - half_dim
+        theta_theta = 10000.0 ** (-torch.arange(0, freqs_theta_dim, 2).float() / freqs_theta_dim)
+        freqs_theta = torch.outer(theta, theta_theta) # (N, freqs_theta_dim/2)
+        
+        # Expand to match dimensions for rotation (cos/sin needs to be applied to pairs)
+        # We repeat interleave to get (N, dim)
+        freqs_r_expanded = freqs_r.repeat_interleave(2, dim=1) # (N, freqs_r_dim)
+        freqs_theta_expanded = freqs_theta.repeat_interleave(2, dim=1) # (N, freqs_theta_dim)
+        
+        # Concatenate to get full head_dim frequencies
+        freqs = torch.cat([freqs_r_expanded, freqs_theta_expanded], dim=1) # (N, head_dim)
+        
+        self.register_buffer("freqs_cos", freqs.cos().unsqueeze(0).unsqueeze(2)) # (1, N, 1, D)
+        self.register_buffer("freqs_sin", freqs.sin().unsqueeze(0).unsqueeze(2))
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2] # (B, H, N, D)
+
+        # Apply RoPE to Q and K
+        q_t = q.transpose(1, 2) # (B, N, H, D)
+        k_t = k.transpose(1, 2)
+        
+        # Split CLS and Spatial
+        q_cls = q_t[:, :1, :, :]
+        q_spatial = q_t[:, 1:, :, :]
+        k_cls = k_t[:, :1, :, :]
+        k_spatial = k_t[:, 1:, :, :]
+        
+        # Apply RoPE to spatial only
+        q_spatial = apply_rotary_pos_emb(q_spatial, self.freqs_cos, self.freqs_sin)
+        k_spatial = apply_rotary_pos_emb(k_spatial, self.freqs_cos, self.freqs_sin)
+        
+        # Concat back
+        q_t = torch.cat([q_cls, q_spatial], dim=1)
+        k_t = torch.cat([k_cls, k_spatial], dim=1)
+        
+        q = q_t.transpose(1, 2)
+        k = k_t.transpose(1, 2)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
 # --- Standard Attention (for non-RoPE) ---
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
@@ -220,11 +319,14 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., 
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_rope=False, img_size=32, patch_size=4):
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, pe_method='sinusoidal', img_size=32, patch_size=4):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        if use_rope:
+        if pe_method == 'rope':
             self.attn = RoPEAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop,
+                                      img_size=img_size, patch_size=patch_size)
+        elif pe_method == 'polar_rope':
+            self.attn = PolarRoPEAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop,
                                       img_size=img_size, patch_size=patch_size)
         else:
             self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
@@ -241,7 +343,7 @@ class Block(nn.Module):
 class VisionTransformer(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_channels=3, num_classes=10, embed_dim=192, depth=9,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0.,
-                 pe_method='sinusoidal'): # pe_method: 'sinusoidal', 'learnable', 'rope'
+                 pe_method='sinusoidal'): # pe_method: 'sinusoidal', 'learnable', 'rope', 'polar_rope'
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
@@ -258,7 +360,7 @@ class VisionTransformer(nn.Module):
             self.pos_embed = SinusoidalPE2D(embed_dim, num_patches + 1, img_size, patch_size)
         elif pe_method == 'learnable':
             self.pos_embed = LearnablePE(embed_dim, num_patches + 1)
-        elif pe_method == 'rope':
+        elif pe_method in ['rope', 'polar_rope']:
             self.pos_embed = nn.Identity() # RoPE is applied in Attention
         else:
             raise ValueError(f"Unknown PE method: {pe_method}")
@@ -268,7 +370,7 @@ class VisionTransformer(nn.Module):
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, 
-                drop=drop_rate, attn_drop=attn_drop_rate, use_rope=(pe_method == 'rope'),
+                drop=drop_rate, attn_drop=attn_drop_rate, pe_method=pe_method,
                 img_size=img_size, patch_size=patch_size
             )
             for _ in range(depth)
@@ -297,7 +399,7 @@ class VisionTransformer(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
-        if self.pe_method != 'rope':
+        if self.pe_method not in ['rope', 'polar_rope']:
             x = self.pos_embed(x)
         
         x = self.pos_drop(x)

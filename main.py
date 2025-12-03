@@ -16,7 +16,7 @@ from sklearn.model_selection import train_test_split
 from model import VisionTransformer
 from utils import set_seed, plot_metrics, plot_comparison
 
-METHODS = ['sinusoidal', 'rope', 'learnable']
+METHODS = ['sinusoidal', 'rope', 'learnable', 'polar_rope']
 
 def get_args():
     parser = argparse.ArgumentParser(description='ViT Positional Encoding Analysis')

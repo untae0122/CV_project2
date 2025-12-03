@@ -16,7 +16,7 @@ RESULT_DIR = './results/50epoch'
 SAVE_DIR = './results/experiments'
 BATCH_SIZE = 128
 DEVICE = 'cpu'
-METHODS = ['sinusoidal', 'rope', 'learnable']
+METHODS = ['sinusoidal', 'rope', 'learnable', 'polar_rope']
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -79,7 +79,7 @@ def load_model(method, path, img_size=32):
              del state_dict['pos_embed.pe']
 
     # Handle RoPE resizing: freqs buffers are fixed size, so we must drop them and let model use new ones
-    if method == 'rope' and img_size != 32:
+    if method in ['rope', 'polar_rope'] and img_size != 32:
         keys_to_remove = [k for k in state_dict.keys() if 'freqs_cos' in k or 'freqs_sin' in k]
         for k in keys_to_remove:
             del state_dict[k]
@@ -195,7 +195,7 @@ def test_attention_distance(models):
             qkv = attn_module.qkv(x).reshape(B, N, 3, attn_module.num_heads, C // attn_module.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]
 
-            if method == 'rope':
+            if method in ['rope', 'polar_rope']:
                  # RoPE logic
                 q_t = q.transpose(1, 2)
                 k_t = k.transpose(1, 2)
@@ -231,7 +231,7 @@ def test_attention_distance(models):
 
         # Bind custom forward
         # Need to import apply_rotary_pos_emb if using rope
-        if method == 'rope':
+        if method in ['rope', 'polar_rope']:
             global apply_rotary_pos_emb
             from model import apply_rotary_pos_emb
 
