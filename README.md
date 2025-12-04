@@ -1,3 +1,5 @@
+![Image](https://github.com/user-attachments/assets/abd3fd5c-50ce-4571-bacc-31b0f4f890be)
+
 # Analysis and Design of Positional Encoding Methods in Vision Transformers
 
 This project implements a Vision Transformer (ViT) from scratch on CIFAR-10 and compares three positional encoding methods:
